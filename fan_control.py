@@ -10,6 +10,24 @@ import sys
 import time
 import signal
 
+def get_gpu_temperatures():
+    try:
+        # Get temperature from nvidia-smi
+        # nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits
+        output = subprocess.check_output(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"], encoding="utf-8")
+        # trim temperatures
+        temperatures = output.strip().split('\n')
+        # Convert string to int
+        temperatures = [int(temp) for temp in temperatures]
+        if not temperatures:
+            return []
+        return temperatures
+    except subprocess.CalledProcessError as e:
+        print(f"nvidia-smi error: {e}")
+    except Exception as e:
+        print(f"Error: {e}")
+        
+
 config = {
     'config_paths': ['fan_control.yaml', '/opt/fan_control/fan_control.yaml'],
     'general': {
@@ -238,10 +256,15 @@ def main():
                 cmd = os.popen(host['remote_temperature_command'])
                 temps = list(map(lambda n: float(n), cmd.read().strip().split('\n')))
                 cmd.close()
-
-            temp_average = round(sum(temps)/len(temps))
-            compute_fan_speed(temp_average, host)
-
+            cpu_temp_avg = round(sum(temps)/len(temps))
+            gpu_temps = get_gpu_temperatures()
+            gpu_temp_avg = round(sum(gpu_temps)/len(gpu_temps))
+            gpu_temp_max = max(gpu_temps)
+            temp_eff = round((cpu_temp_avg + gpu_temp_max + gpu_temp_max + gpu_temp_avg) / 4)
+            if config['general']['debug']:
+                print(f'[{host['name']}] CPU_Avg: {cpu_temp_avg} GPU_M: {gpu_temp_max} GPU_A: {gpu_temp_avg}')
+            max_temp_eff = max(temp_eff, cpu_temp_avg)
+            compute_fan_speed(max_temp_eff, host)
         time.sleep(config['general']['interval'])
 
 

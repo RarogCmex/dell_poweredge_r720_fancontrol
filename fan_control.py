@@ -34,7 +34,7 @@ def get_gpu_temperatures() -> list[int]:
         for temp_str in temps_raw:
             try:
                 temp = int(temp_str)
-                if 0 <= temp <= 200:  # Validate plausible range
+                if 0 <= temp <= 125:  # Validate plausible range
                     temperatures.append(temp)
                 else:
                     print(f"Warning: Invalid GPU temperature '{temp_str}' (ignored)", file=sys.stderr)
@@ -64,7 +64,7 @@ config = {
         'debug': False,
         'interval': 60
     },
-    'host': []
+    'host': {}
 }
 state = {}
 
@@ -116,7 +116,6 @@ def set_fan_speed(threshold_n):
         state['fan_speed'] = wanted_percentage
 
 
-
 def parse_config():
     global config, state
     config_path = next((p for p in config['config_paths'] if os.path.isfile(p)), None)
@@ -125,7 +124,6 @@ def parse_config():
     with open(config_path, 'r') as yaml_conf:
         config.update(yaml.safe_load(yaml_conf))
     host = config['host']
-    print(host)
     if 'hysteresis' not in list(host.keys()):
         host['hysteresis'] = 0
     if len(host['temperatures']) != 3:
@@ -138,6 +136,11 @@ def parse_config():
         'fan_control_mode': 'automatic',
         'fan_speed': 0
     })
+    if config['general']['debug']:
+        print("\nCurrent state:")
+        print(state)
+        print("\nCurrent config:")
+        print(config)
 
 def parse_opts():
     global config
@@ -159,7 +162,6 @@ def parse_opts():
             config['config_paths'] = [arg]
         elif opt in ('-i', '--interval'):
             config['general']['interval'] = arg
-
 
 def checkHysteresis(temperature, threshold_n):
     global state
@@ -209,11 +211,13 @@ def main():
                         temps.append(core.get_value(subfeature.number))
         cpu_temp_avg = round(sum(temps)/len(temps))
         gpu_temps = get_gpu_temperatures()
+        if all(temp == 0 for temp in gpu_temps):
+            print("Warning: All GPU temps reported as 0°C (check driver).", file=sys.stderr)
         gpu_temp_avg = round(sum(gpu_temps)/len(gpu_temps))
         gpu_temp_max = max(gpu_temps)
         temp_eff = round((cpu_temp_avg + gpu_temp_max + gpu_temp_max + gpu_temp_avg) / 4)
         if config['general']['debug']:
-            print(f'[{host['name']}] CPU_Avg: {cpu_temp_avg} GPU_M: {gpu_temp_max} GPU_A: {gpu_temp_avg}')
+            print(f"[{host['name']}] CPU_Avg: {cpu_temp_avg} GPU_M: {gpu_temp_max} GPU_A: {gpu_temp_avg}")
         max_temp_eff = max(temp_eff, cpu_temp_avg)
         compute_fan_speed(max_temp_eff)
         time.sleep(config['general']['interval'])

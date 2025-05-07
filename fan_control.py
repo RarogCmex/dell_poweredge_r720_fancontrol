@@ -23,7 +23,7 @@ def get_gpu_temperatures() -> list[int]:
             encoding="utf-8",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=5,  # Prevent hanging
+            timeout=3,  # Prevent hanging
             check=True,
         )
         
@@ -46,7 +46,8 @@ def get_gpu_temperatures() -> list[int]:
             return [0]
         
         return temperatures
-
+    except KeyboardInterrupt:
+        raise  # Re-raise to allow main loop to handle
     except subprocess.TimeoutExpired:
         print("Error: nvidia-smi timed out (driver hung?). Using fallback (0°C).", file=sys.stderr)
         return [0]
@@ -105,6 +106,8 @@ def set_fan_speed(threshold_n):
     global state
     host = config['host']
     wanted_percentage = host['speeds'][threshold_n]
+    if config['general']['debug']:
+        print(f"\tWanted percentage: {wanted_percentage}%")
     if wanted_percentage == state['fan_speed']:
         return
     if 5 <= wanted_percentage <= 100:
@@ -114,7 +117,6 @@ def set_fan_speed(threshold_n):
             time.sleep(1)
         ipmitool(f"raw 0x30 0x30 0x02 0xff {wanted_percentage_hex}")
         state['fan_speed'] = wanted_percentage
-
 
 def parse_config():
     global config, state
@@ -126,21 +128,21 @@ def parse_config():
     host = config['host']
     if 'hysteresis' not in list(host.keys()):
         host['hysteresis'] = 0
-    if len(host['temperatures']) != 3:
-        raise ConfigError('Host "{}" has {} temperature thresholds instead of 3.'.format(host['name'], len(host['temperatures'])))
-    if len(host['speeds']) != 3:
-        raise ConfigError('Host "{}" has {} fan speeds instead of 3.'.format(host['name'], len(host['speeds'])))
+    if len(host['temperatures']) < 2:
+        raise ConfigError('Host "{}" has less than 2 ({}) temperature thresholds.'.format(host['name'], len(host['temperatures'])))
+    if len(host['speeds']) != len(host['temperatures']):
+        raise ConfigError('Host "{}" has {} fan speeds instead of {}.'.format(host['name'], len(host['speeds'], len(host['temperatures']))))
     # TODO: check presence/validity of values instead of keys presence only
     state.update({
-        'is_remote': 'remote_temperature_command' in host,
         'fan_control_mode': 'automatic',
         'fan_speed': 0
     })
     if config['general']['debug']:
-        print("\nCurrent state:")
+        print("\nInitial state:")
         print(state)
-        print("\nCurrent config:")
+        print("\nInitial config:")
         print(config)
+        print('')
 
 def parse_opts():
     global config
@@ -176,14 +178,24 @@ def checkHysteresis(temperature, threshold_n):
 def compute_fan_speed(temp_average):
     global state
     host = config['host']
-    if temp_average <= host['temperatures'][0] and checkHysteresis(temp_average, 0):
-        set_fan_speed(0)
-    elif host['temperatures'][0] < temp_average <= host['temperatures'][1] and checkHysteresis(temp_average, 1):
-        set_fan_speed(1)
-    elif host['temperatures'][1] < temp_average <= host['temperatures'][2] and checkHysteresis(temp_average, 2):
-        set_fan_speed(2)
-    elif host['temperatures'][2] < temp_average:
+    temps = host['temperatures']
+    speeds = host['speeds']
+    
+    # Handle automatic mode if above highest threshold
+    if temp_average > temps[-1]:
         set_fan_control("automatic")
+        return
+    
+    # Find the appropriate speed level
+    selected_speed = len(temps)  # Default to automatic (will be reduced in loop)
+    for i, threshold in enumerate(temps):
+        if temp_average <= threshold and checkHysteresis(temp_average, i):
+            selected_speed = i
+            break
+    
+    # Apply the speed if found (and not automatic)
+    if selected_speed < len(speeds):
+        set_fan_speed(selected_speed)
 
 def main():
     global config
@@ -191,13 +203,13 @@ def main():
 
     print("Starting fan control script.")
     host = config['host']
-    print("[{}] Thresholds of {}°C ({}%), {}°C ({}%) and {}°C ({}%)".format(
-            host['name'],
-            host['temperatures'][0], host['speeds'][0],
-            host['temperatures'][1], host['speeds'][1],
-            host['temperatures'][2], host['speeds'][2],
-        ))
-
+    print("[{}] Thresholds: {}".format(
+        host['name'],
+        ", ".join(
+            "{}°C ({}%)".format(temp, speed)
+            for temp, speed in zip(host['temperatures'], host['speeds'])
+        )
+    ))
     while True:
         temps = []
         cores = []
@@ -226,18 +238,25 @@ def main():
 def graceful_shutdown(signalnum, frame):
     print(f"Signal {signalnum} received, giving up control")
     set_fan_control("automatic")
+    sensors.cleanup()
     sys.exit(0)
 
 if __name__ == "__main__":
-    # Reset fan control to automatic when getting killed
-    signal.signal(signal.SIGTERM, graceful_shutdown)
-
     try:
         try:
             parse_opts()
         except (getopt.GetoptError, InterruptedError):
             sys.exit(1)
+        
         parse_config()
-        main()
+        
+        try:
+            main()
+        except KeyboardInterrupt:
+            print("\nReceived keyboard interrupt, shutting down...")
+        except Exception as e:
+            print(f"Fatal error: {e}", file=sys.stderr)
+            sys.exit(1)
     finally:
-        sensors.cleanup()
+        # This will run after normal exit or any exception
+        graceful_shutdown(None, None)  # Ensures cleanup happens exactly once

@@ -237,28 +237,50 @@ def main():
         time.sleep(config['general']['interval'])
 
 
-def graceful_shutdown(signalnum, frame):
-    print(f"Signal {signalnum} received, giving up control")
-    set_fan_control("automatic")
-    sensors.cleanup()
+def graceful_shutdown(signalnum=None, frame=None):
+    """
+    Ensures that fan control is returned to automatic mode,
+    sensors are cleaned up, and the script exits cleanly.
+    This function swallows any errors to guarantee shutdown.
+    """
+    print(f"Signal {signalnum} received, performing shutdown procedure.")
+    # Attempt to set fans to automatic, ignoring failures
+    try:
+        if state.get('fan_control_mode') is not None:
+            set_fan_control("automatic")
+    except Exception as e:
+        print(f"Error during set_fan_control in shutdown: {e}", file=sys.stderr)
+    # Attempt sensors cleanup, ignoring failures
+    try:
+        sensors.cleanup()
+    except Exception as e:
+        print(f"Error during sensors.cleanup in shutdown: {e}", file=sys.stderr)
+    # Exit regardless
     sys.exit(0)
 
 if __name__ == "__main__":
+    # Register OS signals to ensure graceful shutdown
+    signal.signal(signal.SIGINT, graceful_shutdown)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+
     try:
-        try:
-            parse_opts()
-        except (getopt.GetoptError, InterruptedError):
-            sys.exit(1)
-        
+        parse_opts()
         parse_config()
-        
-        try:
-            main()
-        except KeyboardInterrupt:
-            print("\nReceived keyboard interrupt, shutting down...")
-        except Exception as e:
-            print(f"Fatal error: {e}", file=sys.stderr)
-            sys.exit(1)
+        main()
+    except (getopt.GetoptError, InterruptedError):
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nReceived keyboard interrupt, shutting down...")
+    except Exception as e:
+        print(f"Fatal error: {e}", file=sys.stderr)
+        sys.exit(1)
     finally:
-        # This will run after normal exit or any exception
-        graceful_shutdown(None, None)  # Ensures cleanup happens exactly once
+        # Ensure cleanup on any exit path
+        try:
+            graceful_shutdown(None, None)
+        except SystemExit:
+            pass
+        except Exception as e:
+            print(f"Unexpected error in final shutdown: {e}", file=sys.stderr)
+            sensors.cleanup()
+            sys.exit(0)

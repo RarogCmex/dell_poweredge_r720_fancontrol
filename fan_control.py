@@ -187,6 +187,53 @@ def set_fan_speed(threshold_n):
         ipmitool(f"raw 0x30 0x30 0x02 0xff {wanted_percentage_hex}")
         state['fan_speed'] = wanted_percentage
 
+def validate_temperature_curve(curve_name, temperatures, speeds):
+    """
+    Validate temperature curve configuration with comprehensive checks.
+    Focuses on preventing crashes and unsafe configurations.
+    """
+    # CRITICAL: Minimum length requirement (must have at least 2 points for meaningful control)
+    if len(temperatures) < 2:
+        raise ConfigError(f'{curve_name} must have at least 2 temperature thresholds (found {len(temperatures)}).')
+
+    # CRITICAL: Array length matching (prevents index errors)
+    if len(speeds) != len(temperatures):
+        raise ConfigError(f'{curve_name} has {len(speeds)} speeds but {len(temperatures)} temperatures - arrays must have identical lengths.')
+
+    # CRITICAL: Temperatures must be sorted ascending (prevents logic errors)
+    if temperatures != sorted(temperatures):
+        raise ConfigError(f'{curve_name} temperatures must be in strictly ascending order: {temperatures}')
+
+    # CRITICAL: Temperature range validation (prevents invalid sensor readings)
+    for i, temp in enumerate(temperatures):
+        if temp < 0 or temp > 125:
+            raise ConfigError(f'{curve_name} temperature {i} is {temp}°C - must be between 0-125°C.')
+
+    # CRITICAL: Speed range validation (prevents invalid fan commands)
+    for i, speed in enumerate(speeds):
+        if speed < 1 or speed > 100:
+            raise ConfigError(f'{curve_name} speed {i} is {speed}% - must be between 1-100%.')
+
+    # INFORMATIONAL: Warn about potentially unusual configurations
+    # (These don't prevent operation but help users identify issues)
+    
+    # Warn if speeds aren't sorted (may cause unexpected behavior)
+    if speeds != sorted(speeds):
+        print(f"Warning: {curve_name} speeds are not sorted - this may cause unexpected fan behavior: {speeds}")
+
+    # Warn if first speed is very high (may indicate configuration error)
+    if speeds[0] > 50:
+        print(f"Warning: {curve_name} starts at {speeds[0]}% - this is unusually high for minimum speed.")
+
+    # Warn if last speed is very low (may not provide sufficient cooling before automatic mode)
+    if speeds[-1] < 30:
+        print(f"Warning: {curve_name} maximum is {speeds[-1]}% - may not provide sufficient cooling before automatic mode takes over.")
+
+    # Warn if speed decreases with increasing temperature (likely configuration error)
+    if len(speeds) > 1 and speeds[0] > speeds[-1]:
+        print(f"Warning: {curve_name} has decreasing speeds ({speeds[0]}% → {speeds[-1]}%) - this is unusual and may cause unexpected behavior.")
+
+
 def parse_config():
     global config, state
     config_path = next((p for p in config['config_paths'] if os.path.isfile(p)), None)
@@ -204,14 +251,72 @@ def parse_config():
     if 'monitor_nvidia_gpus' not in gpu_config:
         gpu_config['monitor_nvidia_gpus'] = True
     
+    # CRITICAL: Validate host section exists and is valid
+    if 'host' not in config:
+        raise ConfigError('Configuration missing required "host" section.')
+
     host = config['host']
-    if 'hysteresis' not in list(host.keys()):
-        host['hysteresis'] = 0
-    if len(host['temperatures']) < 2:
-        raise ConfigError('Host "{}" has less than 2 ({}) temperature thresholds.'.format(host['name'], len(host['temperatures'])))
-    if len(host['speeds']) != len(host['temperatures']):
-        raise ConfigError('Host "{}" has {} fan speeds instead of {}.'.format(host['name'], len(host['speeds'], len(host['temperatures']))))
-    # TODO: check presence/validity of values instead of keys presence only
+    if 'name' not in host:
+        raise ConfigError('Host configuration missing required "name" field.')
+
+    # CRITICAL: Validate host temperatures and speeds
+    if 'temperatures' not in host:
+        raise ConfigError('Host configuration missing required "temperatures" field.')
+    if 'speeds' not in host:
+        raise ConfigError('Host configuration missing required "speeds" field.')
+
+    # Validate host curve
+    validate_temperature_curve('Host configuration', host['temperatures'], host['speeds'])
+
+    # CRITICAL: Validate temperature_control section if present
+    if 'temperature_control' in config:
+        temp_control = config['temperature_control']
+
+        # Validate CPU curve if present
+        if 'cpu_curve' in temp_control:
+            cpu_curve = temp_control['cpu_curve']
+            if 'temperatures' not in cpu_curve:
+                raise ConfigError('CPU curve missing required "temperatures" field.')
+            if 'speeds' not in cpu_curve:
+                raise ConfigError('CPU curve missing required "speeds" field.')
+            validate_temperature_curve('CPU curve', cpu_curve['temperatures'], cpu_curve['speeds'])
+
+        # Validate GPU curve if present
+        if 'gpu_curve' in temp_control:
+            gpu_curve = temp_control['gpu_curve']
+            if 'temperatures' not in gpu_curve:
+                raise ConfigError('GPU curve missing required "temperatures" field.')
+            if 'speeds' not in gpu_curve:
+                raise ConfigError('GPU curve missing required "speeds" field.')
+            validate_temperature_curve('GPU curve', gpu_curve['temperatures'], gpu_curve['speeds'])
+
+        # Ensure curves have same number of grades for predictable behavior
+        if 'cpu_curve' in temp_control and 'gpu_curve' in temp_control:
+            cpu_len = len(temp_control['cpu_curve']['temperatures'])
+            gpu_len = len(temp_control['gpu_curve']['temperatures'])
+            if cpu_len != gpu_len:
+                raise ConfigError(f'CPU curve has {cpu_len} grades but GPU curve has {gpu_len} grades - must match for predictable behavior.')
+
+    # Handle backward compatibility: auto-populate new format from legacy
+    if 'temperature_control' not in config:
+        config['temperature_control'] = {
+            'cpu_curve': {
+                'temperatures': host['temperatures'],
+                'speeds': host['speeds'],
+                'hysteresis': host.get('hysteresis', 2)
+            },
+            'gpu_curve': {
+                'temperatures': host['temperatures'],
+                'speeds': host['speeds'],
+                'hysteresis': host.get('hysteresis', 2)
+            }
+        }
+
+    # Set hysteresis default
+    if 'hysteresis' not in host:
+        host['hysteresis'] = 2
+
+    # Initialize state
     state.update({
         'fan_control_mode': 'automatic',
         'fan_speed': 0
@@ -254,11 +359,12 @@ def checkHysteresis(temperature, threshold_n):
         return temperature <= host['temperatures'][threshold_n] - host['hysteresis']
     return True
 
-def calculate_effective_temperature(cpu_temp_avg, gpu_temps):
+def calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps):
     """
     Calculate effective temperature using improved algorithm with:
     - Separate CPU/GPU curves
     - Max overpower detection
+    - CPU hotspot protection
     - Configurable weighting
     
     Returns: (effective_temp, use_gpu_curve, debug_info)
@@ -270,24 +376,34 @@ def calculate_effective_temperature(cpu_temp_avg, gpu_temps):
     max_overpower_threshold = temp_control.get('max_overpower_threshold', 15)
     cpu_weight = temp_control.get('cpu_weight', 0.5)
     gpu_weight = temp_control.get('gpu_weight', 0.5)
+    hotspot_threshold = temp_control.get('hotspot_threshold', 10)  # Default 10°C difference
     
     # Handle GPU temperatures
     gpu_temp_avg = round(sum(gpu_temps)/len(gpu_temps)) if gpu_temps else 0
     gpu_temp_max = max(gpu_temps) if gpu_temps else 0
+    
+    # Check for CPU hotspot condition
+    cpu_hotspot_detected = (cpu_temp_max - cpu_temp_avg) >= hotspot_threshold
     
     # Determine which component is dominant
     temp_diff = gpu_temp_max - cpu_temp_avg
     
     debug_info = {
         'cpu_avg': cpu_temp_avg,
+        'cpu_max': cpu_temp_max,
         'gpu_avg': gpu_temp_avg,
         'gpu_max': gpu_temp_max,
-        'temp_diff': temp_diff
+        'temp_diff': temp_diff,
+        'cpu_hotspot': cpu_hotspot_detected
     }
     
-    # Check for max overpower condition
-    # Get the appropriate curve based on which component is dominant
-    if abs(temp_diff) > 10:  # Significant difference
+    # If CPU hotspot detected, prioritize cooling the hot CPU core
+    if cpu_hotspot_detected:
+        effective_temp = cpu_temp_max
+        use_gpu_curve = False
+        debug_info['decision'] = 'cpu_hotspot'
+        debug_info['hotspot_temp'] = cpu_temp_max
+    elif abs(temp_diff) > 10:  # Significant difference
         if temp_diff > 0:  # GPU significantly hotter
             effective_temp = gpu_temp_max
             use_gpu_curve = True
@@ -307,40 +423,19 @@ def calculate_effective_temperature(cpu_temp_avg, gpu_temps):
 def compute_fan_speed(temp_average, use_gpu_curve=False):
     """
     Compute fan speed using appropriate curve (CPU or GPU).
-    Maintains backward compatibility with single curve configuration.
+    Configuration is already validated during startup, so we can assume valid data.
     """
     global state
     
-    # Determine which curve to use
-    if use_gpu_curve and 'temperature_control' in config:
-        # Use GPU curve if available and requested
-        curve = config['temperature_control'].get('gpu_curve', {})
-        if curve and 'temperatures' in curve and 'speeds' in curve:
-            temps = curve['temperatures']
-            speeds = curve['speeds']
-            hysteresis = curve.get('hysteresis', config['host'].get('hysteresis', 2))
-        else:
-            # Fallback to CPU curve or legacy
-            use_gpu_curve = False
+    # Determine which curve to use - configuration already validated during startup
+    if use_gpu_curve:
+        curve = config['temperature_control']['gpu_curve']
+    else:
+        curve = config['temperature_control']['cpu_curve']
     
-    if not use_gpu_curve:
-        # Use CPU curve or legacy configuration
-        if 'temperature_control' in config:
-            curve = config['temperature_control'].get('cpu_curve', {})
-            if curve and 'temperatures' in curve and 'speeds' in curve:
-                temps = curve['temperatures']
-                speeds = curve['speeds']
-                hysteresis = curve.get('hysteresis', config['host'].get('hysteresis', 2))
-            else:
-                # Fallback to legacy configuration
-                temps = config['host']['temperatures']
-                speeds = config['host']['speeds']
-                hysteresis = config['host'].get('hysteresis', 2)
-        else:
-            # Pure legacy configuration
-            temps = config['host']['temperatures']
-            speeds = config['host']['speeds']
-            hysteresis = config['host'].get('hysteresis', 2)
+    temps = curve['temperatures']
+    speeds = curve['speeds']
+    hysteresis = curve.get('hysteresis', config['host'].get('hysteresis', 2))
     
     # Handle automatic mode if above highest threshold
     if temp_average > temps[-1]:
@@ -364,13 +459,38 @@ def main():
 
     print("Starting fan control script.")
     host = config['host']
-    print("[{}] Thresholds: {}".format(
-        host['name'],
-        ", ".join(
-            "{}°C ({}%)".format(temp, speed)
-            for temp, speed in zip(host['temperatures'], host['speeds'])
-        )
-    ))
+    
+    # Display the actual configuration being used
+    if 'temperature_control' in config and 'cpu_curve' in config['temperature_control']:
+        # Using new temperature control configuration
+        curve = config['temperature_control']['cpu_curve']
+        print("[{}] Using NEW temperature control configuration".format(host['name']))
+        print("[{}] CPU Curve: {}".format(
+            host['name'],
+            ", ".join(
+                "{}°C ({}%)".format(temp, speed)
+                for temp, speed in zip(curve['temperatures'], curve['speeds'])
+            )
+        ))
+        if 'gpu_curve' in config['temperature_control']:
+            gpu_curve = config['temperature_control']['gpu_curve']
+            print("[{}] GPU Curve: {}".format(
+                host['name'],
+                ", ".join(
+                    "{}°C ({}%)".format(temp, speed)
+                    for temp, speed in zip(gpu_curve['temperatures'], gpu_curve['speeds'])
+                )
+            ))
+    else:
+        # Using legacy configuration
+        print("[{}] Using LEGACY temperature control configuration".format(host['name']))
+        print("[{}] Thresholds: {}".format(
+            host['name'],
+            ", ".join(
+                "{}°C ({}%)".format(temp, speed)
+                for temp, speed in zip(host['temperatures'], host['speeds'])
+            )
+        ))
     while True:
         temps = []
         cores = []
@@ -383,16 +503,19 @@ def main():
                     if subfeature.name.endswith("_input"):
                         temps.append(core.get_value(subfeature.number))
         cpu_temp_avg = round(sum(temps)/len(temps))
+        cpu_temp_max = max(temps) if temps else cpu_temp_avg
         gpu_temps = get_gpu_temperatures()
         if all(temp == 0 for temp in gpu_temps):
             print("Warning: All GPU temps reported as 0°C (check driver).", file=sys.stderr)
         
-        # Use improved algorithm with separate curves and max overpower detection
-        effective_temp, use_gpu_curve, debug_info = calculate_effective_temperature(cpu_temp_avg, gpu_temps)
+        # Use improved algorithm with hotspot protection
+        effective_temp, use_gpu_curve, debug_info = calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps)
         
         if config['general']['debug']:
-            print(f"[{host['name']}] CPU_Avg: {debug_info['cpu_avg']} GPU_M: {debug_info['gpu_max']} GPU_A: {debug_info['gpu_avg']}")
+            print(f"[{host['name']}] CPU_Avg: {debug_info['cpu_avg']} CPU_Max: {debug_info['cpu_max']} GPU_M: {debug_info['gpu_max']} GPU_A: {debug_info['gpu_avg']}")
             print(f"[{host['name']}] Decision: {debug_info['decision']} -> Effective: {effective_temp}°C, Curve: {'GPU' if use_gpu_curve else 'CPU'}")
+            if debug_info.get('cpu_hotspot'):
+                print(f"[{host['name']}] HOTSPOT DETECTED: CPU max {debug_info['cpu_max']}°C vs avg {debug_info['cpu_avg']}°C")
         
         compute_fan_speed(effective_temp, use_gpu_curve)
         time.sleep(config['general']['interval'])

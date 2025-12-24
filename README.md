@@ -138,6 +138,9 @@ temperature_control:
     temperatures: [65, 70, 80, 85]
     speeds: [15, 20, 30, 40]
     hysteresis: 3
+  
+  # CPU hotspot protection (NEW!)
+  hotspot_threshold: 10  # °C difference to trigger hotspot protection
 ```
 
 ### **Multi-GPU Monitoring**
@@ -160,6 +163,7 @@ gpu_monitoring:
 | `temperature_control` | `max_overpower_threshold` | Safety threshold (°C) | `15` |
 | `temperature_control` | `cpu_weight` | CPU weight (0.0-1.0) | `0.5` |
 | `temperature_control` | `gpu_weight` | GPU weight (0.0-1.0) | `0.5` |
+| `temperature_control` | `hotspot_threshold` | CPU hotspot threshold (°C) | `10` |
 | `gpu_monitoring` | `monitor_amd_gpus` | Monitor AMD GPUs | `true` |
 | `gpu_monitoring` | `monitor_nvidia_gpus` | Monitor NVIDIA GPUs | `true` |
 
@@ -180,22 +184,31 @@ gpu_monitoring:
 - **GPU Temperatures**: Max and average of all GPUs (AMD/NVIDIA)
 - **Validation**: Range checking (0-125°C) and sensor filtering
 
-#### **2. Dominance Detection**
+#### **2. Hotspot Detection & Dominance Detection**
 ```
-temp_diff = gpu_temp_max - cpu_temp_avg
+# First check for CPU hotspot (individual core much hotter than average)
+cpu_hotspot_detected = (cpu_temp_max - cpu_temp_avg) >= hotspot_threshold
 
-if temp_diff > 10°C:
-    # GPU Dominant - Use GPU max temp + GPU curve
-    effective_temp = gpu_temp_max
-    use_gpu_curve = true
-elif temp_diff < -10°C:
-    # CPU Dominant - Use CPU avg temp + CPU curve
-    effective_temp = cpu_temp_avg
+if cpu_hotspot_detected:
+    # CPU Hotspot - Use CPU max temp + CPU curve to protect hot core
+    effective_temp = cpu_temp_max
     use_gpu_curve = false
 else:
-    # Balanced - Use weighted average + CPU curve
-    effective_temp = cpu_temp_avg * cpu_weight + gpu_temp_max * gpu_weight
-    use_gpu_curve = false
+    # Normal dominance detection
+    temp_diff = gpu_temp_max - cpu_temp_avg
+    
+    if temp_diff > 10°C:
+        # GPU Dominant - Use GPU max temp + GPU curve
+        effective_temp = gpu_temp_max
+        use_gpu_curve = true
+    elif temp_diff < -10°C:
+        # CPU Dominant - Use CPU avg temp + CPU curve
+        effective_temp = cpu_temp_avg
+        use_gpu_curve = false
+    else:
+        # Balanced - Use weighted average + CPU curve
+        effective_temp = cpu_temp_avg * cpu_weight + gpu_temp_max * gpu_weight
+        use_gpu_curve = false
 ```
 
 #### **3. Curve Selection & Fan Control**
@@ -204,7 +217,9 @@ else:
 - **Automatic Mode**: Engaged when temperature exceeds highest threshold
 
 #### **4. Safety Features**
+- **CPU Hotspot Protection**: Detects and prioritizes cooling for individual hot CPU cores
 - **Max Overpower Protection**: Immediate response when temp > threshold + 15°C
+- **Configuration Validation**: Comprehensive validation prevents crashes from invalid configurations
 - **Sensor Failure Handling**: Graceful degradation to safe defaults
 - **Automatic Failover**: Hardware control when software limits exceeded
 

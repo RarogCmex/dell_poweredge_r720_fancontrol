@@ -138,6 +138,9 @@ temperature_control:
     temperatures: [65, 70, 80, 85]
     speeds: [15, 20, 30, 40]
     hysteresis: 3
+  
+  # Защита от горячих точек CPU (НОВОЕ!)
+  hotspot_threshold: 10  # Разница температур для активации защиты от горячих точек
 ```
 
 ### **Мониторинг нескольких GPU**
@@ -160,6 +163,7 @@ gpu_monitoring:
 | `temperature_control` | `max_overpower_threshold` | Порог безопасности (°C) | `15` |
 | `temperature_control` | `cpu_weight` | Вес CPU (0.0-1.0) | `0.5` |
 | `temperature_control` | `gpu_weight` | Вес GPU (0.0-1.0) | `0.5` |
+| `temperature_control` | `hotspot_threshold` | Порог горячих точек CPU (°C) | `10` |
 | `gpu_monitoring` | `monitor_amd_gpus` | Мониторинг AMD GPU | `true` |
 | `gpu_monitoring` | `monitor_nvidia_gpus` | Мониторинг NVIDIA GPU | `true` |
 
@@ -180,22 +184,31 @@ gpu_monitoring:
 - **Температуры GPU**: Максимум и среднее всех GPU (AMD/NVIDIA)
 - **Валидация**: Проверка диапазона (0-125°C) и фильтрация датчиков
 
-#### **2. Определение доминирующего компонента**
+#### **2. Обнаружение горячих точек и определение доминирующего компонента**
 ```
-temp_diff = gpu_temp_max - cpu_temp_avg
+# Сначала проверяем горячие точки CPU (отдельное ядро намного горячее среднего)
+cpu_hotspot_detected = (cpu_temp_max - cpu_temp_avg) >= hotspot_threshold
 
-if temp_diff > 10°C:
-    # GPU доминирует - использовать макс. температуру GPU + кривую GPU
-    effective_temp = gpu_temp_max
-    use_gpu_curve = true
-elif temp_diff < -10°C:
-    # CPU доминирует - использовать сред. температуру CPU + кривую CPU
-    effective_temp = cpu_temp_avg
+if cpu_hotspot_detected:
+    # Горячая точка CPU - использовать макс. температуру CPU + кривую CPU для защиты горячего ядра
+    effective_temp = cpu_temp_max
     use_gpu_curve = false
 else:
-    # Сбалансированная нагрузка - использовать взвешенное среднее + кривую CPU
-    effective_temp = cpu_temp_avg * cpu_weight + gpu_temp_max * gpu_weight
-    use_gpu_curve = false
+    # Обычное определение доминирующего компонента
+    temp_diff = gpu_temp_max - cpu_temp_avg
+    
+    if temp_diff > 10°C:
+        # GPU доминирует - использовать макс. температуру GPU + кривую GPU
+        effective_temp = gpu_temp_max
+        use_gpu_curve = true
+    elif temp_diff < -10°C:
+        # CPU доминирует - использовать сред. температуру CPU + кривую CPU
+        effective_temp = cpu_temp_avg
+        use_gpu_curve = false
+    else:
+        # Сбалансированная нагрузка - использовать взвешенное среднее + кривую CPU
+        effective_temp = cpu_temp_avg * cpu_weight + gpu_temp_max * gpu_weight
+        use_gpu_curve = false
 ```
 
 #### **3. Выбор кривой и управление вентиляторами**
@@ -204,7 +217,9 @@ else:
 - **Автоматический режим**: Включается при превышении максимального порога температуры
 
 #### **4. Функции безопасности**
+- **Защита от горячих точек CPU**: Обнаружение и приоритизация охлаждения отдельных горячих ядер CPU
 - **Защита от перегрева**: Немедленная реакция при temp > порог + 15°C
+- **Валидация конфигурации**: Комплексная валидация предотвращает сбои из-за неверных конфигураций
 - **Обработка сбоев датчиков**: Плавная деградация до безопасных значений по умолчанию
 - **Автоматический отказоустойчивый режим**: Аппаратное управление при превышении программных лимитов
 

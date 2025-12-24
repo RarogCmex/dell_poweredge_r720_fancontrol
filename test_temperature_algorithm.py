@@ -66,10 +66,11 @@ def test_cpu_dominant():
         }
     }
     
-    cpu_temp = 80
+    cpu_temp_avg = 80
+    cpu_temp_max = 82  # Slightly higher max for realistic scenario
     gpu_temps = [55, 52, 50]
     
-    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp, gpu_temps)
+    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps)
     
     assert effective_temp == 80, f"Expected 80°C, got {effective_temp}°C"
     assert use_gpu_curve == False, f"Expected CPU curve, got GPU curve"
@@ -106,10 +107,11 @@ def test_gpu_dominant():
         }
     }
     
-    cpu_temp = 60
+    cpu_temp_avg = 60
+    cpu_temp_max = 62  # Slightly higher max for realistic scenario
     gpu_temps = [75, 72, 70]
     
-    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp, gpu_temps)
+    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps)
     
     assert effective_temp == 75, f"Expected 75°C, got {effective_temp}°C"
     assert use_gpu_curve == True, f"Expected GPU curve, got CPU curve"
@@ -146,10 +148,11 @@ def test_balanced_workload():
         }
     }
     
-    cpu_temp = 65
+    cpu_temp_avg = 65
+    cpu_temp_max = 67  # Slightly higher max for realistic scenario
     gpu_temps = [68, 66, 64]
     
-    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp, gpu_temps)
+    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps)
     
     expected_temp = round(65 * 0.5 + 68 * 0.5)  # 66.5 -> 67
     assert effective_temp == expected_temp, f"Expected {expected_temp}°C, got {effective_temp}°C"
@@ -187,10 +190,11 @@ def test_no_gpus():
         }
     }
     
-    cpu_temp = 65
+    cpu_temp_avg = 65
+    cpu_temp_max = 65  # No difference when no GPUs
     gpu_temps = []
     
-    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp, gpu_temps)
+    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps)
     
     assert effective_temp == 65, f"Expected 65°C, got {effective_temp}°C"
     assert use_gpu_curve == False, f"Expected CPU curve, got GPU curve"
@@ -212,11 +216,12 @@ def test_backward_compatibility():
         # No temperature_control section - should use defaults
     }
     
-    cpu_temp = 65
+    cpu_temp_avg = 65
+    cpu_temp_max = 67  # Slightly higher max for realistic scenario
     gpu_temps = [70, 68, 66]
     
     # Should not raise any errors and use default values
-    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp, gpu_temps)
+    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps)
     
     # With default weights (0.5 each), should get weighted average
     expected_temp = round(65 * 0.5 + 70 * 0.5)  # 67.5 -> 68
@@ -254,10 +259,11 @@ def test_custom_weights():
     }
     
     # Test CPU dominant scenario
-    cpu_temp = 80
+    cpu_temp_avg = 80
+    cpu_temp_max = 82  # Slightly higher max for realistic scenario
     gpu_temps = [65, 63, 61]  # 15°C difference, CPU is hotter
     
-    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp, gpu_temps)
+    effective_temp, use_gpu_curve, debug_info = fan_control.calculate_effective_temperature(cpu_temp_avg, cpu_temp_max, gpu_temps)
     
     # Should be CPU dominant due to >10°C difference (CPU hotter)
     assert effective_temp == 80, f"Expected 80°C (CPU dominant), got {effective_temp}°C"

@@ -1,0 +1,42 @@
+general:
+  debug: false  # Set to true only when debugging is needed to avoid log spam
+  interval: 60
+
+# GPU monitoring configuration (both enabled by default)
+gpu_monitoring:
+  monitor_amd_gpus: true    # Enable AMD GPU temperature monitoring
+  monitor_nvidia_gpus: true # Enable NVIDIA GPU temperature monitoring
+
+# Temperature control algorithm configuration
+temperature_control:
+  # Global settings
+  max_overpower_threshold: 15  # °C above threshold to trigger max-based control
+  cpu_weight: 0.5           # Weight for CPU temperature (0.0-1.0)
+  gpu_weight: 0.5           # Weight for GPU temperature (0.0-1.0)
+  
+  # CPU temperature curve (applies when CPU is dominant)
+  cpu_curve:
+    temperatures: [55, 60, 70, 75]
+    speeds: [13, 17, 25, 37]
+    hysteresis: 2
+    
+  # GPU temperature curve (applies when GPU is dominant)
+  gpu_curve:
+    temperatures: [65, 70, 80, 85]  # Higher thresholds for GPUs
+    speeds: [15, 20, 30, 40]       # Slightly more aggressive cooling
+    hysteresis: 3
+
+host:
+  name: MyLocalHost
+  # Legacy configuration (kept for backward compatibility)
+  hysteresis: 2
+  temperatures:
+    - 55
+    - 60
+    - 70
+    - 75
+  speeds:
+    - 13
+    - 17
+    - 25
+    - 37

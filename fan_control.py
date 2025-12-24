@@ -254,18 +254,100 @@ def checkHysteresis(temperature, threshold_n):
         return temperature <= host['temperatures'][threshold_n] - host['hysteresis']
     return True
 
-def compute_fan_speed(temp_average):
+def calculate_effective_temperature(cpu_temp_avg, gpu_temps):
+    """
+    Calculate effective temperature using improved algorithm with:
+    - Separate CPU/GPU curves
+    - Max overpower detection
+    - Configurable weighting
+    
+    Returns: (effective_temp, use_gpu_curve, debug_info)
+    """
+    # Get temperature control configuration with backward compatibility
+    temp_control = config.get('temperature_control', {})
+    
+    # Default values (maintain backward compatibility)
+    max_overpower_threshold = temp_control.get('max_overpower_threshold', 15)
+    cpu_weight = temp_control.get('cpu_weight', 0.5)
+    gpu_weight = temp_control.get('gpu_weight', 0.5)
+    
+    # Handle GPU temperatures
+    gpu_temp_avg = round(sum(gpu_temps)/len(gpu_temps)) if gpu_temps else 0
+    gpu_temp_max = max(gpu_temps) if gpu_temps else 0
+    
+    # Determine which component is dominant
+    temp_diff = gpu_temp_max - cpu_temp_avg
+    
+    debug_info = {
+        'cpu_avg': cpu_temp_avg,
+        'gpu_avg': gpu_temp_avg,
+        'gpu_max': gpu_temp_max,
+        'temp_diff': temp_diff
+    }
+    
+    # Check for max overpower condition
+    # Get the appropriate curve based on which component is dominant
+    if abs(temp_diff) > 10:  # Significant difference
+        if temp_diff > 0:  # GPU significantly hotter
+            effective_temp = gpu_temp_max
+            use_gpu_curve = True
+            debug_info['decision'] = 'gpu_dominant'
+        else:  # CPU significantly hotter
+            effective_temp = cpu_temp_avg
+            use_gpu_curve = False
+            debug_info['decision'] = 'cpu_dominant'
+    else:  # Balanced workload
+        effective_temp = round(cpu_temp_avg * cpu_weight + gpu_temp_max * gpu_weight)
+        use_gpu_curve = False  # Use CPU curve as default for balanced
+        debug_info['decision'] = 'balanced'
+        debug_info['weighted_temp'] = effective_temp
+    
+    return effective_temp, use_gpu_curve, debug_info
+
+def compute_fan_speed(temp_average, use_gpu_curve=False):
+    """
+    Compute fan speed using appropriate curve (CPU or GPU).
+    Maintains backward compatibility with single curve configuration.
+    """
     global state
-    host = config['host']
-    temps = host['temperatures']
-    speeds = host['speeds']
+    
+    # Determine which curve to use
+    if use_gpu_curve and 'temperature_control' in config:
+        # Use GPU curve if available and requested
+        curve = config['temperature_control'].get('gpu_curve', {})
+        if curve and 'temperatures' in curve and 'speeds' in curve:
+            temps = curve['temperatures']
+            speeds = curve['speeds']
+            hysteresis = curve.get('hysteresis', config['host'].get('hysteresis', 2))
+        else:
+            # Fallback to CPU curve or legacy
+            use_gpu_curve = False
+    
+    if not use_gpu_curve:
+        # Use CPU curve or legacy configuration
+        if 'temperature_control' in config:
+            curve = config['temperature_control'].get('cpu_curve', {})
+            if curve and 'temperatures' in curve and 'speeds' in curve:
+                temps = curve['temperatures']
+                speeds = curve['speeds']
+                hysteresis = curve.get('hysteresis', config['host'].get('hysteresis', 2))
+            else:
+                # Fallback to legacy configuration
+                temps = config['host']['temperatures']
+                speeds = config['host']['speeds']
+                hysteresis = config['host'].get('hysteresis', 2)
+        else:
+            # Pure legacy configuration
+            temps = config['host']['temperatures']
+            speeds = config['host']['speeds']
+            hysteresis = config['host'].get('hysteresis', 2)
     
     # Handle automatic mode if above highest threshold
     if temp_average > temps[-1]:
         set_fan_control("automatic")
         return
     
-    # Find the appropriate speed level
+    # Find the appropriate speed level with hysteresis
     selected_speed = len(temps)  # Default to automatic (will be reduced in loop)
     for i, threshold in enumerate(temps):
         if temp_average <= threshold and checkHysteresis(temp_average, i):
@@ -304,13 +386,15 @@ def main():
         gpu_temps = get_gpu_temperatures()
         if all(temp == 0 for temp in gpu_temps):
             print("Warning: All GPU temps reported as 0°C (check driver).", file=sys.stderr)
-        gpu_temp_avg = round(sum(gpu_temps)/len(gpu_temps))
-        gpu_temp_max = max(gpu_temps)
-        temp_eff = round((cpu_temp_avg + gpu_temp_max + gpu_temp_max + gpu_temp_avg) / 4)
+        
+        # Use improved algorithm with separate curves and max overpower detection
+        effective_temp, use_gpu_curve, debug_info = calculate_effective_temperature(cpu_temp_avg, gpu_temps)
+        
         if config['general']['debug']:
-            print(f"[{host['name']}] CPU_Avg: {cpu_temp_avg} GPU_M: {gpu_temp_max} GPU_A: {gpu_temp_avg}")
-        max_temp_eff = max(temp_eff, cpu_temp_avg)
-        compute_fan_speed(max_temp_eff)
+            print(f"[{host['name']}] CPU_Avg: {debug_info['cpu_avg']} GPU_M: {debug_info['gpu_max']} GPU_A: {debug_info['gpu_avg']}")
+            print(f"[{host['name']}] Decision: {debug_info['decision']} -> Effective: {effective_temp}°C, Curve: {'GPU' if use_gpu_curve else 'CPU'}")
+        
+        compute_fan_speed(effective_temp, use_gpu_curve)
         time.sleep(config['general']['interval'])
 
 

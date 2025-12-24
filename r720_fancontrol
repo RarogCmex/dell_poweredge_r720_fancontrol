@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# Copyright 2020 Denis Reva
+# Distributed under the terms of the GNU General Public License v2
+
+R720_FANCONTROL_TERMTIMEOUT=${FANCONTROL_TERMTIMEOUT:-"TERM/60/KILL/5"}
+
+command="/opt/fan_control/venv/bin/python3 --quiet"
+command_args="-u /opt/fan_control/fan_control.py"
+pidfile="/run/r720_fancontrol.pid"
+retry="${R720_FANCONTROL_TERMTIMEOUT}"
+command_background=true
+required_files=""
+output_log=/var/log/r720_fancontrol.log
+depend() {
+	need localmount
+	use lm_sensors
+}

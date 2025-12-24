@@ -6,11 +6,13 @@
 [![AMD GPU Support](https://img.shields.io/badge/AMD-GPU_Support-red.svg)](https://www.amd.com/)
 [![NVIDIA GPU Support](https://img.shields.io/badge/NVIDIA-GPU_Support-green.svg)](https://www.nvidia.com/)
 [![Open Source](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Русская документация](https://img.shields.io/badge/Документация-Русский-blue.svg)](README_RU.md)
+
+**🌍 [Russian Documentation / Русская документация](README_RU.md)**
 
 - [📋 Features](#-features)
 - [🔧 Requisites](#-requisites)
 - [🛠️ Installation / Upgrade](#-installation--upgrade)
-  - [Docker Deployment](#docker-deployment)
 - [📝 Configuration](#-configuration)
   - [Basic Configuration](#basic-configuration)
   - [Advanced Temperature Control](#advanced-temperature-control)
@@ -97,19 +99,7 @@ sudo ./install.sh [<installation_path>]
 
 **Default Installation**: `/opt/fan_control` with service `fan-control.service`
 
-### **Docker Deployment**
-```bash
-# Build Docker image
-docker build -t fan_control .
-
-# Run container with config and SSH keys
-docker run -d --restart=always --name fan_control \
-  -v "./fan_control.yaml:/app/fan_control.yaml:ro" \
-  -v "./keys:/app/keys:ro" \
-  fan_control
-```
-
-**Recommended**: Use Docker orchestrator (Kubernetes, Docker Swarm) for production deployments
+**Note**: If a configuration file already exists, it will be renamed with a `.old` extension.
 
 ---
 

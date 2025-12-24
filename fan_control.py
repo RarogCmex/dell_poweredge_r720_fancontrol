@@ -10,10 +10,41 @@ import sys
 import time
 import signal
 
-def get_gpu_temperatures() -> list[int]:
+def get_amd_temperatures() -> list[int]:
     """
-    Fetch GPU temperatures using nvidia-smi with safety checks.
-    Returns a list of temperatures (or [0] as fallback if errors occur).
+    Fetch AMD GPU temperatures using sensors library.
+    Returns a list of temperatures (or empty list if no AMD GPUs detected or errors occur).
+    Errors are printed to stderr.
+    """
+    amd_temps = []
+    try:
+        for sensor in sensors.get_detected_chips():
+            # Use 'amdgpu' only (k10temp is for AMD CPUs, not GPUs)
+            if sensor.prefix == 'amdgpu':
+                for feature in sensor.get_features():
+                    # FIXED: Use sensor.get_all_subfeatures() instead of core.get_all_subfeatures()
+                    for subfeature in sensor.get_all_subfeatures(feature):
+                        # Only process temperature inputs (temp*_input), not voltage/fan/frequency readings
+                        if subfeature.name.startswith('temp') and subfeature.name.endswith("_input"):
+                            try:
+                                temp = sensor.get_value(subfeature.number)
+                                # Use the original range 0-125°C as specified in the plan
+                                # This handles edge cases and cold GPUs properly
+                                if 0 <= temp <= 125:  # Validate plausible range
+                                    amd_temps.append(temp)
+                                else:
+                                    print(f"Warning: Invalid AMD GPU temperature {temp}°C (ignored)", file=sys.stderr)
+                            except Exception as e:
+                                print(f"Warning: Error reading AMD GPU temperature: {str(e)}", file=sys.stderr)
+    except Exception as e:
+        print(f"Error in get_amd_temperatures(): {str(e)}", file=sys.stderr)
+    
+    return amd_temps
+
+def get_nvidia_temperatures() -> list[int]:
+    """
+    Fetch NVIDIA GPU temperatures using nvidia-smi with safety checks.
+    Returns a list of temperatures (or empty list if errors occur).
     Errors are printed to stderr.
     """
     try:
@@ -37,26 +68,62 @@ def get_gpu_temperatures() -> list[int]:
                 if 0 <= temp <= 125:  # Validate plausible range
                     temperatures.append(temp)
                 else:
-                    print(f"Warning: Invalid GPU temperature '{temp_str}' (ignored)", file=sys.stderr)
+                    print(f"Warning: Invalid NVIDIA GPU temperature '{temp_str}' (ignored)", file=sys.stderr)
             except ValueError:
-                print(f"Warning: Non-numeric GPU temperature '{temp_str}' (ignored)", file=sys.stderr)
-        
-        if not temperatures:
-            print("Error: No valid GPU temperatures found. Using fallback (0°C).", file=sys.stderr)
-            return [0]
+                print(f"Warning: Non-numeric NVIDIA GPU temperature '{temp_str}' (ignored)", file=sys.stderr)
         
         return temperatures
     except KeyboardInterrupt:
         raise  # Re-raise to allow main loop to handle
     except subprocess.TimeoutExpired:
-        print("Error: nvidia-smi timed out (driver hung?). Using fallback (0°C).", file=sys.stderr)
-        return [0]
+        print("Error: nvidia-smi timed out (driver hung?).", file=sys.stderr)
+        return []
     except subprocess.CalledProcessError as e:
         print(f"Error: nvidia-smi failed (exit={e.returncode}): {e.stderr.strip()}", file=sys.stderr)
-        return [0]
+        return []
     except Exception as e:
-        print(f"Error: Unexpected error in get_gpu_temperatures(): {str(e)}", file=sys.stderr)
+        print(f"Error: Unexpected error in get_nvidia_temperatures(): {str(e)}", file=sys.stderr)
+        return []
+
+def get_gpu_temperatures() -> list[int]:
+    """
+    Get temperatures from all available GPUs (both AMD and NVIDIA).
+    Returns combined list of all GPU temperatures.
+    
+    Improved version with proper error handling and validation.
+    """
+    temperatures = []
+    
+    try:
+        # Get AMD GPU temperatures using sensors library
+        if config.get('gpu_monitoring', {}).get('monitor_amd_gpus', True):
+            amd_temps = get_amd_temperatures()
+            if amd_temps:
+                temperatures.extend(amd_temps)
+                if config['general']['debug']:
+                    print(f"AMD GPU temperatures detected: {amd_temps}")
+            else:
+                if config['general']['debug']:
+                    print("Warning: No AMD GPU temperatures detected", file=sys.stderr)
+        
+        # Get NVIDIA GPU temperatures using nvidia-smi
+        if config.get('gpu_monitoring', {}).get('monitor_nvidia_gpus', True):
+            nvidia_temps = get_nvidia_temperatures()
+            if nvidia_temps:
+                temperatures.extend(nvidia_temps)
+                if config['general']['debug']:
+                    print(f"NVIDIA GPU temperatures detected: {nvidia_temps}")
+            else:
+                if config['general']['debug']:
+                    print("Warning: No NVIDIA GPU temperatures detected", file=sys.stderr)
+    except KeyboardInterrupt:
+        raise  # Re-raise to allow main loop to handle
+    except Exception as e:
+        print(f"Error in get_gpu_temperatures(): {str(e)}", file=sys.stderr)
         return [0]
+    
+    # Return combined temperatures or fallback
+    return temperatures if temperatures else [0]
         
 
 config = {
@@ -127,6 +194,16 @@ def parse_config():
         raise RuntimeError("Missing or unspecified configuration file.")
     with open(config_path, 'r') as yaml_conf:
         config.update(yaml.safe_load(yaml_conf))
+    
+    # Validate GPU monitoring configuration
+    if 'gpu_monitoring' not in config:
+        config['gpu_monitoring'] = {}
+    gpu_config = config['gpu_monitoring']
+    if 'monitor_amd_gpus' not in gpu_config:
+        gpu_config['monitor_amd_gpus'] = True
+    if 'monitor_nvidia_gpus' not in gpu_config:
+        gpu_config['monitor_nvidia_gpus'] = True
+    
     host = config['host']
     if 'hysteresis' not in list(host.keys()):
         host['hysteresis'] = 0
